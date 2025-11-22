@@ -1,0 +1,12 @@
+{
+  "listen_ip": "0.0.0.0",
+  "port_range": { "min": 30000, "max": 30050 },
+  "protocol": "tcp",
+  "totp_secret": "JBSWY3DPEHPK3PXP",
+  "step_seconds": 30,
+  "skew_steps": 1,
+  "target_addr": "127.0.0.1",
+  "target_port": 8080,
+  "allowed_client_ips": [],
+  "tls": { "enabled": false, "cert_file": "", "key_file": "" }
+}

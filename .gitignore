@@ -1,0 +1,14 @@
+.DS_Store
+*.log
+*.out
+coverage.out
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+bin/
+build/
+dist/
+tmp/

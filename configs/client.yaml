@@ -1,0 +1,15 @@
+name: "endpointA"
+server_host: "127.0.0.1"
+port_range:
+  min: 30000
+  max: 30050
+protocol: "tcp"
+totp_secret: "JBSWY3DPEHPK3PXP"
+step_seconds: 30
+skew_steps: 1
+bind_ip: "127.0.0.1"
+bind_port: 10080
+client_id: "client"
+tls:
+  enabled: false
+  insecure_skip_verify: false
