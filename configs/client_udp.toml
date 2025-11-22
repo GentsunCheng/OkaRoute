@@ -1,0 +1,13 @@
+name = "endpointU"
+server_host = "127.0.0.1"
+protocol = "udp"
+totp_secret = "JBSWY3DPEHPK3PXP"
+step_seconds = 10
+skew_steps = 1
+bind_ip = "127.0.0.1"
+bind_port = 11080
+client_id = "clientU"
+
+[port_range]
+min = 30100
+max = 30120

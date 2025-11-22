@@ -1,0 +1,11 @@
+name: "routeU"
+listen_ip: "0.0.0.0"
+port_range:
+  min: 30100
+  max: 30120
+protocol: "udp"
+totp_secret: "JBSWY3DPEHPK3PXP"
+step_seconds: 10
+skew_steps: 1
+target_addr: "127.0.0.1"
+target_port: 9090

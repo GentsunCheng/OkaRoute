@@ -21,12 +21,14 @@ type Server struct {
     target string
     mu sync.Mutex
     listeners map[int]net.Listener
+    udpConns map[int]*net.UDPConn
+    udpSessions map[int]map[string]*udpSession
     currentStep int64
     name string
 }
 
 func New(cfg config.ServerConfig, secret []byte) *Server {
-    return &Server{cfg: cfg, secret: secret, target: net.JoinHostPort(cfg.TargetAddr, itoa(cfg.TargetPort)), listeners: map[int]net.Listener{}, name: cfg.Name}
+    return &Server{cfg: cfg, secret: secret, target: net.JoinHostPort(cfg.TargetAddr, itoa(cfg.TargetPort)), listeners: map[int]net.Listener{}, udpConns: map[int]*net.UDPConn{}, udpSessions: map[int]map[string]*udpSession{}, name: cfg.Name}
 }
 
 func itoa(i int) string { return fmtInt(i) }
@@ -89,13 +91,80 @@ func (s *Server) handleConnOnPort(port int, c net.Conn) {
 }
 
 func ioReadFull(c net.Conn, b []byte) (int, error) { return io.ReadFull(c, b) }
+type udpSession struct {
+    dst *net.UDPConn
+    client *net.UDPAddr
+    authenticated bool
+}
+
+func (s *Server) openUDP(port int) error {
+    if _, ok := s.udpConns[port]; ok { return nil }
+    addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.cfg.ListenIP, fmtInt(port)))
+    if err != nil { return err }
+    conn, err := net.ListenUDP("udp", addr)
+    if err != nil { return err }
+    s.udpConns[port] = conn
+    s.udpSessions[port] = map[string]*udpSession{}
+    if s.name != "" { log.Printf("[%s] 服务端开始监听端口(UDP): %d", s.name, port) } else { log.Printf("服务端开始监听端口(UDP): %d", port) }
+    go s.udpLoop(port, conn)
+    return nil
+}
+
+func (s *Server) closeUDP(port int) {
+    if c, ok := s.udpConns[port]; ok { c.Close(); delete(s.udpConns, port) }
+    delete(s.udpSessions, port)
+}
+
+func (s *Server) udpLoop(port int, conn *net.UDPConn) {
+    buf := make([]byte, 65535)
+    targetAddr, _ := net.ResolveUDPAddr("udp", s.target)
+    for {
+        n, clientAddr, err := conn.ReadFromUDP(buf)
+        if err != nil { return }
+        key := clientAddr.String()
+        s.mu.Lock()
+        sess := s.udpSessions[port][key]
+        if sess == nil {
+            if n < (8+16+32) { s.mu.Unlock(); continue }
+            step := int64(binary.BigEndian.Uint64(buf[0:8]))
+            nonce := buf[8:24]
+            token := buf[24:56]
+            nowStep := porthop.StepIndex(time.Now(), s.cfg.StepSeconds)
+            if !porthop.ClampSkew(step, nowStep, s.cfg.SkewSteps) || !auth.Verify(s.secret, step, nonce, token, "client") {
+                s.mu.Unlock(); continue
+            }
+            dst, err := net.DialUDP("udp", nil, targetAddr)
+            if err != nil { s.mu.Unlock(); continue }
+            sess = &udpSession{dst: dst, client: clientAddr, authenticated: true}
+            s.udpSessions[port][key] = sess
+            go func(sess *udpSession) {
+                rbuf := make([]byte, 65535)
+                for {
+                    rn, _, rerr := sess.dst.ReadFromUDP(rbuf)
+                    if rerr != nil { return }
+                    conn.WriteToUDP(rbuf[:rn], sess.client)
+                }
+            }(sess)
+            payload := buf[56:n]
+            sess.dst.Write(payload)
+            s.mu.Unlock()
+            continue
+        }
+        s.mu.Unlock()
+        sess.dst.Write(buf[:n])
+    }
+}
 
 func (s *Server) Start(ctx context.Context) error {
     s.currentStep = porthop.StepIndex(time.Now(), s.cfg.StepSeconds)
     prev, curr, next := porthop.Triplet(s.secret, s.currentStep, s.cfg.PortRange.Min, s.cfg.PortRange.Max)
     ports := porthop.UniquePorts([]int{prev, curr, next})
     for _, p := range ports {
-        if err := s.openPort(p); err != nil { return err }
+        if s.cfg.Protocol == "udp" {
+            if err := s.openUDP(p); err != nil { return err }
+        } else {
+            if err := s.openPort(p); err != nil { return err }
+        }
     }
     if s.name != "" { log.Printf("[%s] 服务端启动: step=%d 监听端口 prev=%d curr=%d next=%d 目标=%s", s.name, s.currentStep, prev, curr, next, s.target) } else { log.Printf("服务端启动: step=%d 监听端口 prev=%d curr=%d next=%d 目标=%s", s.currentStep, prev, curr, next, s.target) }
     t := time.NewTicker(time.Duration(s.cfg.StepSeconds) * time.Second)
@@ -105,6 +174,7 @@ func (s *Server) Start(ctx context.Context) error {
         case <-ctx.Done():
             s.mu.Lock()
             for p, l := range s.listeners { l.Close(); delete(s.listeners, p) }
+            for p, u := range s.udpConns { u.Close(); delete(s.udpConns, p) }
             s.mu.Unlock()
             return nil
         case <-t.C:
@@ -112,8 +182,11 @@ func (s *Server) Start(ctx context.Context) error {
             p2, c2, n2 := porthop.Triplet(s.secret, s.currentStep, s.cfg.PortRange.Min, s.cfg.PortRange.Max)
             newSet := map[int]struct{}{}
             for _, p := range porthop.UniquePorts([]int{p2, c2, n2}) { newSet[p] = struct{}{} }
-            for p := range newSet { s.openPort(p) }
+            for p := range newSet {
+                if s.cfg.Protocol == "udp" { s.openUDP(p) } else { s.openPort(p) }
+            }
             for p := range s.listeners { if _, ok := newSet[p]; !ok { s.closePort(p); if s.name != "" { log.Printf("[%s] 服务端关闭端口: %d", s.name, p) } else { log.Printf("服务端关闭端口: %d", p) } } }
+            for p := range s.udpConns { if _, ok := newSet[p]; !ok { s.closeUDP(p); if s.name != "" { log.Printf("[%s] 服务端关闭端口: %d", s.name, p) } else { log.Printf("服务端关闭端口: %d", p) } } }
             if s.name != "" { log.Printf("[%s] 服务端轮换: step=%d 监听端口 prev=%d curr=%d next=%d", s.name, s.currentStep, p2, c2, n2) } else { log.Printf("服务端轮换: step=%d 监听端口 prev=%d curr=%d next=%d", s.currentStep, p2, c2, n2) }
         }
     }
